@@ -83,7 +83,8 @@ python app.py
 python app.py
 ```
 
-启动后访问 `http://localhost:7861` 即可进入游戏界面。
+启动后访问 `http://localhost:8001` 即可进入游戏界面。
+调试控制台 `http://localhost:7001` 即可进入调试界面。
 
 ## 游戏规则
 
