@@ -8,7 +8,7 @@ class Player:
         self.email = email
         self.display_name = display_name
         self.role = "散户"
-        self.cash = 100000.0
+        self.cash = 1000000.0
         self.stock = 0
         self.debt = 0.0
         self.logs = []
@@ -287,7 +287,7 @@ class GameState:
 
     def calculate_short_fee(self):
         total_short = sum(abs(p.stock) for p in self.players.values() if p.stock < 0)
-        crowding = min(1.0, total_short / 100000)
+        crowding = min(1.0, total_short / 1000000)
         self.short_pressure = crowding
         return 0.05 + (0.45 * crowding)
 
@@ -354,6 +354,6 @@ class GameState:
 
     def post_message(self, email, content):
         p = self.players[email]
-        tag = "【内幕】" if p.role == "操盘手" else "【投资者】"
+        tag = "【投资者】" if p.role == "操盘手" else "【投资者】"
         self.messages.append(f"{tag} {p.display_name}: {content}")
         return "发送成功"

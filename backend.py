@@ -6,64 +6,72 @@ from shared import GAME
 
 def draw_kline_chart(game_instance):
     """
-    使用 Plotly 绘制专业的 K线图 + 成交量柱状图
+    绘制专业的暗色系 K线图
     """
     data = game_instance.kline_data
     
-    # 如果没有数据（游戏刚开始），显示一个空的占位图
+    # 配色方案 (中国/加密货币习惯：红涨绿跌)
+    # 如果你是美股习惯，把下面两个颜色对调即可
+    COLOR_UP = '#ff3333'   # 涨 - 红
+    COLOR_DOWN = '#00ff00' # 跌 - 绿
+    BG_COLOR = '#161a25'   # 深色背景 (类似 TradingView)
+
     if not data:
         fig = go.Figure()
         fig.update_layout(
             title="等待开盘数据...", 
-            xaxis_title="时间 (小时)", 
+            xaxis_title="时间", 
             yaxis_title="价格",
             template="plotly_dark",
-            paper_bgcolor='rgba(0,0,0,0)', # 透明背景
-            plot_bgcolor='rgba(0,0,0,0)'
+            paper_bgcolor=BG_COLOR,
+            plot_bgcolor=BG_COLOR,
+            font=dict(color='#d1d4dc')
         )
         return fig
 
-    # 转换为 DataFrame 方便处理
     df = pd.DataFrame(data)
     
-    # 创建子图：上面是K线，下面是成交量
     fig = make_subplots(
         rows=2, cols=1, 
         shared_xaxes=True, 
-        vertical_spacing=0.05, 
+        vertical_spacing=0.03, 
         row_heights=[0.7, 0.3]
     )
 
-    # 1. 绘制 K线 (Candlestick)
+    # 1. K线图
     fig.add_trace(go.Candlestick(
         x=df['time'],
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        name="股价"
+        open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+        name="Price",
+        increasing_line_color=COLOR_UP,
+        decreasing_line_color=COLOR_DOWN
     ), row=1, col=1)
 
-    # 2. 绘制成交量 (Volume)
-    # 颜色逻辑：收盘 > 开盘 显示绿色，否则红色
-    colors = ['#00ff00' if row['close'] >= row['open'] else '#ff0000' for index, row in df.iterrows()]
-    
+    # 2. 成交量 (颜色跟随涨跌)
+    vol_colors = [COLOR_UP if row['close'] >= row['open'] else COLOR_DOWN for index, row in df.iterrows()]
     fig.add_trace(go.Bar(
-        x=df['time'],
-        y=df['volume'],
-        marker_color=colors,
-        name="成交量"
+        x=df['time'], y=df['volume'], 
+        marker_color=vol_colors, 
+        name="Volume"
     ), row=2, col=1)
 
-    # 3. 样式美化
+    # 3. 样式精修 (去除网格，纯粹的黑底)
     fig.update_layout(
-        title=f"HK.8888 实时走势 (当前: ${game_instance.current_price:.2f})",
-        xaxis_rangeslider_visible=False, # 隐藏下方自带的滑块
-        template="plotly_dark", # 黑色极客风格
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=400 # 固定高度
+        title=dict(
+            text=f"HK.8888 实时走势 (当前: ${game_instance.current_price:.2f})",
+            font=dict(color='white', size=16)
+        ),
+        xaxis_rangeslider_visible=False,
+        template="plotly_dark",
+        paper_bgcolor=BG_COLOR, # 画布背景
+        plot_bgcolor=BG_COLOR,  # 图表背景
+        margin=dict(l=40, r=20, t=60, b=20),
+        height=450,
+        showlegend=False,
+        # 隐藏讨厌的网格线，看起来更专业
+        xaxis=dict(showgrid=False, zeroline=False),
+        yaxis=dict(showgrid=True, gridcolor='#2a2e39', zeroline=False),
+        yaxis2=dict(showgrid=False, zeroline=False),
     )
     
     return fig
@@ -73,73 +81,75 @@ def get_dashboard_info(game_instance, email):
     if email not in game_instance.players:
         return (
             f"## 🚫 未登录 (在线: {len(game_instance.players)})", 
-            "请登录", "无数据", "", "", None, None # 多返回一个 plot 对象
+            "请登录", "无数据", "", "", None, None, 
+            "请先登录", "请先登录"
         )
     
     p = game_instance.players[email]
-    
-    # --- 构建状态栏 ---
     current_price = game_instance.current_price
-    net_worth = p.get_net_worth(current_price)
     
+    # --- 动态提示信息 ---
+    _, _, avail_cash, _ = p.get_margin_info(current_price)
+    max_buy = int(avail_cash / (current_price * 1.05))
+    buy_hint = f"💰 最大可买: {max_buy} 股"
+    
+    if p.stock > 0:
+        sell_hint = f"📦 持仓: {p.stock} 股"
+    elif p.stock < 0:
+        sell_hint = f"📉 做空: {abs(p.stock)} 股"
+    else:
+        max_short = int((p.cash * 2) / current_price) if p.cash > 0 else 0
+        sell_hint = f"⚡ 最大可空: ~{max_short} 股"
+
+    # --- 状态数据 ---
+    net_worth = p.get_net_worth(current_price)
     short_val, frozen, avail, risk_ratio = p.get_margin_info(current_price)
     status_label = p.get_account_status(current_price)
     
-    status_line = f"**账户状态**: {status_label}"
-    if "正常" in status_label: status_line = f"🟢 {status_line}"
-    elif "冻结" in status_label: status_line = f"🟠 {status_line}"
-    else: status_line = f"🔴 {status_line} (风险率: {risk_ratio:.2f})"
-
-    cash_detail = f"总现金: ${p.cash:,.0f}"
-    if p.stock < 0: cash_detail += f" | 🔒 冻结: ${frozen:,.0f} | ✅ **可用**: ${avail:,.0f}"
-    else: cash_detail += f" | ✅ **可用**: ${avail:,.0f}"
-
-    role_display = p.role if game_instance.phase != "报名阶段" else "等待分配"
-    online_str = " | ".join([pl.display_name for pl in game_instance.players.values()])
+    # 状态栏图标
+    if "正常" in status_label: status_icon = "🟢"
+    elif "冻结" in status_label: status_icon = "🟠"
+    else: status_icon = "🔴"
     
+    role_display = p.role if game_instance.phase != "报名阶段" else "等待分配"
+    
+    # 注意：这里的 Markdown 会被放入暗色背景，所以尽量不要用黑色字
+    # Gradio Markdown 在暗色模式下会自动变白，但我们可以用 HTML 强制
     status_md = f"""
-    ### 👤 交易终端 | {p.display_name} ({role_display})
-    {status_line}
-    * **资金**: {cash_detail}
-    * **持仓**: {p.stock} 股 (市值 ${p.stock * current_price:,.0f})
-    * **净值**: **${net_worth:,.2f}**
-    * **时间**: {game_instance.phase} (第 {game_instance.game_clock}/12 小时)
-    ---
-    **🌐 大厅**: {online_str}
+    ### {status_icon} 账户状态: {status_label}
+    * **代号**: {p.display_name} | **身份**: {role_display}
+    * **净值**: **${net_worth:,.2f}** (现金: ${p.cash:,.0f})
+    * **购买力**: ${avail:,.0f} | **冻结**: ${frozen:,.0f}
     """
     
-    # 3. 价格与趋势
     trend_md = ""
     if game_instance.phase == "交易阶段":
         if p.role == "散户":
-            trend_md = f"📊 **简报**: 做空拥挤度 {game_instance.short_pressure*100:.0f}% | 交易费率 5%起"
+            trend_md = f"📊 **市场情绪**: 空头拥挤度 {game_instance.short_pressure*100:.0f}%"
         elif p.role == "操盘手":
             daily_proj = game_instance.hourly_trend * 12 * 100
             trend_md = f"""
             #### 👁️ 上帝视角
-            * 每小时自然趋势: {game_instance.hourly_trend*100:+.2f}%
-            * 全天预计偏差: {daily_proj:+.2f}%
-            * 当前人为动能: {game_instance.current_momentum*100:+.2f}%
+            * 趋势: {game_instance.hourly_trend*100:+.2f}%/h
+            * 动能: {game_instance.current_momentum*100:+.2f}%
             """
             
-    price_md = f"# 📈 ${game_instance.current_price:.2f}"
+    price_md = f"# ${game_instance.current_price:.2f}"
     
-    # 4. 图表生成 (核心新增)
     kline_plot = draw_kline_chart(game_instance)
     
-    # 5. 日志与排行
     logs_str = "\n".join(game_instance.system_logs[-8:]) 
     messages_str = "\n".join(getattr(game_instance, 'messages', [])[-8:] or ["暂无留言..."])
 
     leaderboard_md = ""
     if game_instance.phase == "结算阶段":
         sorted_players = sorted(game_instance.players.values(), key=lambda x: x.cash, reverse=True)
-        leaderboard_md = "### 🏆 最终排行榜\n| 排名 | 玩家 | 邮箱 | 身份 | 资产 |\n|---|---|---|---|---|\n"
+        leaderboard_md = "### 🏆 最终排行榜\n| 排名 | 玩家 | 身份 | 资产 |\n|---|---|---|---|\n"
         for idx, pl in enumerate(sorted_players):
             icon = "💀" if pl.cash <= 0 else "💰"
-            leaderboard_md += f"| {idx+1} | {pl.display_name} | {pl.email} | {pl.role} | {icon} ${pl.cash:,.0f} |\n"
+            leaderboard_md += f"| {idx+1} | {pl.display_name} | {pl.role} | {icon} ${pl.cash:,.0f} |\n"
             
-    return status_md, price_md, trend_md, logs_str, messages_str, leaderboard_md, kline_plot
+    return status_md, price_md, trend_md, logs_str, messages_str, leaderboard_md, kline_plot, buy_hint, sell_hint
 
 # 管理员功能保持不变
 def admin_start():
