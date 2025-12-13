@@ -1,6 +1,8 @@
 import random
 import math
 import os
+import time
+import threading # <--- 新增线程模块
 from datetime import datetime
 
 class Player:
@@ -13,9 +15,12 @@ class Player:
         self.debt = 0.0
         self.logs = []
         self.last_event = None 
+        
+        # 【新增】交易冷却记录
+        # 记录上一次交易发生的游戏小时数 (初始为-99确保开局可交易)
+        self.last_trade_turn = -99 
 
     def get_net_worth(self, current_price):
-        """计算净资产 = 现金 + 股票市值 - 债务"""
         stock_value = self.stock * current_price
         return self.cash + stock_value - self.debt
 
@@ -31,27 +36,44 @@ class Player:
         
         return short_val, frozen_cash, max(0, available_cash), risk_ratio
 
-    def get_account_status(self, current_price):
-        if self.last_event == "LIQUIDATED": return "☠️ 刚刚爆仓"
+    def get_account_status(self, current_price, current_clock):
+        """返回账户的当前状态标签 (含冷却状态)"""
+        status = []
+        
+        # 1. 爆仓检查
+        if self.last_event == "LIQUIDATED": 
+            return "☠️ 刚刚爆仓"
+        
+        # 2. 冷却检查
+        cooldown_left = 3 - (current_clock - self.last_trade_turn)
+        if cooldown_left > 0:
+            status.append(f"❄️ 交易冷却 ({cooldown_left}h)")
+        
+        # 3. 资金/持仓状态
         short_val, frozen, avail, risk = self.get_margin_info(current_price)
         
-        status = []
-        if self.debt > 0: status.append("💸 负债中")
+        if self.debt > 0: status.append("💸 负债")
+        
         if self.stock < 0:
             if risk < 1.15: status.append("🆘 濒临强平")
             elif risk < 1.35: status.append("⚠️ 保证金告急")
             elif avail < 5000: status.append("🔒 资产冻结")
-            else: status.append("📉 做空")
+            else: status.append("📉 做空中")
         elif self.stock > 0:
-            status.append("📈 持仓")
+            status.append("📈 持仓中")
         else:
-            status.append("✅ 空仓")
+            if "❄️" not in str(status): # 如果没冷却且没持仓
+                status.append("✅ 待机")
             
         return " | ".join(status)
 
 class GameState:
     def __init__(self):
         self.players = {}
+        # 【配置】真实世界多少秒 = 游戏里1小时
+        # 300秒 = 5分钟/小时 -> 整局游戏 60分钟
+        # 如果想测试快一点，可以改为 10 或 60
+        self.seconds_per_hour = 3600 
         self.reset()
 
     def reset(self):
@@ -73,8 +95,6 @@ class GameState:
         self.kline_data = [] 
         self.current_open = 100.0 
         self.current_volume = 0
-        
-        # 记录本局总结，用于战报
         self.final_summary = ""
 
     def log(self, message):
@@ -91,6 +111,8 @@ class GameState:
 
     def start_game(self):
         if len(self.players) < 1: return "人数不足"
+        if self.is_running: return "游戏已在运行中"
+        
         self.is_running = True
         self.phase = "交易阶段"
         self.game_clock = 0
@@ -107,15 +129,32 @@ class GameState:
         for e in self.players:
             self.players[e].role = "操盘手" if e in mm else "散户"
         
-        self.log(f"开盘！共{len(self.players)}人入场。")
+        self.log(f"开盘！共{len(self.players)}人。时钟设定: 1小时={self.seconds_per_hour}秒")
+        
+        # 【新增】启动自动时钟线程
+        threading.Thread(target=self._auto_run_loop, daemon=True).start()
+        
         return "游戏开始"
+
+    def _auto_run_loop(self):
+        """后台线程：根据真实时间自动推进游戏"""
+        print(f"[System] 自动时钟已启动，每 {self.seconds_per_hour} 秒推进一小时。")
+        
+        while self.is_running and self.game_clock < 12:
+            # 睡眠指定时间
+            time.sleep(self.seconds_per_hour)
+            
+            # 再次检查状态（防止睡眠期间游戏被重置）
+            if not self.is_running: break
+            
+            print(f"[System] 自动推进时间 -> 第 {self.game_clock + 1} 小时")
+            self.next_hour()
 
     def next_hour(self):
         if not self.is_running or self.game_clock >= 12: return
 
-        # K线与价格计算
         hour_open = self.current_open
-        prev_price = self.current_price # 记录上一小时价格用于计算涨跌幅
+        prev_price = self.current_price 
         
         noise = random.uniform(-0.01, 0.01)
         change = self.hourly_trend + self.current_momentum + noise
@@ -136,25 +175,22 @@ class GameState:
         self.game_clock += 1
         self.history.append(self.current_price)
         
-        # === LLM 小时点评 ===
+        # 异步调用 LLM 点评 (防止阻塞主线程太久)
+        # 为了简单，这里还是同步调用，但建议生产环境用异步
         from scripts.news_system import generate_hourly_comment, format_news_for_display
+        try:
+            hour_change_pct = ((hour_close - prev_price) / prev_price) * 100
+            comment = generate_hourly_comment(self.game_clock, hour_close, hour_change_pct, self.current_volume)
+            formatted_comment = format_news_for_display(comment, tag="🤖 盘面分析")
+            self.system_logs.append(formatted_comment)
+            self.messages.append(formatted_comment)
+        except:
+            pass # 防止LLM报错卡死游戏
         
-        # 在子线程或者直接调用（注意 Qwen3VL 可能会稍微卡顿 1-2秒，这里直接同步调用）
-        # 计算本小时实际涨跌百分比
-        hour_change_pct = ((hour_close - prev_price) / prev_price) * 100
-        comment = generate_hourly_comment(self.game_clock, hour_close, hour_change_pct, self.current_volume)
-        formatted_comment = format_news_for_display(comment, tag="🤖 盘面分析")
-        
-        self.system_logs.append(formatted_comment)
-        # 也可以推送到留言板
-        self.messages.append(formatted_comment)
-        
-        # 重置下一小时
         self.current_open = self.current_price
         self.current_volume = 0
         self.current_momentum = 0.0 
         
-        # 强平检查
         maintenance_margin = 1.10
         for p in self.players.values():
             p.last_event = None 
@@ -182,68 +218,36 @@ class GameState:
 
     def end_game(self):
         self.phase = "结算阶段"
-        
-        # 1. 资产结算 (扣除管理费)
-        retail_players = [] # 存储散户对象
-        mm_players = []     # 存储操盘手对象
+        retail_players = []
+        mm_players = []
         
         for p in self.players.values():
             val = p.get_net_worth(self.current_price)
             fee = val * 0.10
             final_val = val - fee
-            
             p.cash = final_val
             p.stock = 0
             p.debt = 0
             p.logs.append(f"结算完成，管理费 ${fee:,.2f}，最终净值 ${final_val:,.2f}")
-            
-            if p.role == "操盘手":
-                mm_players.append(p)
-            else:
-                retail_players.append(p)
+            if p.role == "操盘手": mm_players.append(p)
+            else: retail_players.append(p)
 
-        # 2. 计算【收割指标】(Harvest Metrics)
-        # 统计散户的总初始资金 vs 总最终资金
-        initial_capital_per_person = 1000000.0
-        total_retail_loss = 0.0
-        
-        for rp in retail_players:
-            # 只统计亏损的人，赚的人不算在"收割"里
-            loss = initial_capital_per_person - rp.cash
-            if loss > 0:
-                total_retail_loss += loss
-        
-        # 设定目标：必须收割至少 20% 的散户本金，或者固定金额 $1,500,000
-        # 这里使用动态目标：散户总人数 * 2万
+        initial_capital = 1000000.0
+        total_retail_loss = sum(max(0, initial_capital - rp.cash) for rp in retail_players)
         harvest_target = len(retail_players) * 200000
         mm_mission_success = total_retail_loss >= harvest_target
         
-        # 3. 寻找表面赢家 (资产最高者)
         sorted_players = sorted(self.players.values(), key=lambda x: x.cash, reverse=True)
         top_player = sorted_players[0] if sorted_players else None
-        losers_count = sum(1 for p in sorted_players if p.cash < initial_capital_per_person)
+        losers_count = sum(1 for p in sorted_players if p.cash < initial_capital)
         
-        # 4. 构建传给 LLM 的数据包
-        # 我们把操盘手的特殊表现打包进去
         game_stats = {
-            "start_price": self.history[0],
-            "end_price": self.current_price,
-            "top_player": top_player,
-            "losers_count": losers_count,
-            "total_retail_loss": total_retail_loss,
-            "harvest_target": harvest_target,
-            "mm_success": mm_mission_success,
-            "mm_names": [m.display_name for m in mm_players]
+            "start_price": self.history[0], "end_price": self.current_price,
+            "top_player": top_player, "losers_count": losers_count,
+            "total_retail_loss": total_retail_loss, "harvest_target": harvest_target,
+            "mm_success": mm_mission_success, "mm_names": [m.display_name for m in mm_players]
         }
         
-        # === DEBUG 输出 ===
-        print("-" * 40)
-        print(f"[DEBUG] 结算数据:")
-        print(f"散户总失血: ${total_retail_loss:,.2f} / 目标: ${harvest_target:,.2f}")
-        print(f"操盘手任务: {'✅ 达标' if mm_mission_success else '❌ 失败'}")
-        print("-" * 40)
-
-        # 5. LLM 结局分析
         from scripts.news_system import generate_end_game_summary
         if top_player:
             self.final_summary = generate_end_game_summary(game_stats)
@@ -251,35 +255,6 @@ class GameState:
         
         self.log("游戏结束，收割完成。")
         self.save_game_report()
-
-    def take_loan(self, email, amount):
-        """【新增】申请高利贷"""
-        try: amount = int(amount)
-        except: return "请输入整数金额"
-        if amount <= 0: return "金额需大于0"
-        
-        p = self.players[email]
-        
-        # 额度限制：当前持有现金的 90%
-        # 这里指"手里现有的钱"，不包括已经借来的钱的限制，但利息会教做人
-        max_loan = int(p.cash * 0.9)
-        
-        if amount > max_loan:
-            return f"❌ 信用额度不足。当前最高可借: ${max_loan:,.0f} (现金的90%)"
-        
-        # 执行贷款
-        interest_rate = 0.30
-        repayment_amount = amount * (1 + interest_rate)
-        
-        p.cash += amount
-        p.debt += repayment_amount
-        
-        p.logs.append(f"💸 申请贷款 ${amount:,.0f}，实到 ${amount:,.0f}，新增负债 ${repayment_amount:,.0f} (利率30%)")
-        self.log(f"玩家 {p.display_name} 申请了高杠杆贷款，背水一战！")
-        
-        return "贷款成功，资金已到账"
-
-
 
     def save_game_report(self):
         save_dir = "savedata"
@@ -289,43 +264,29 @@ class GameState:
         try:
             with open(filename, "w", encoding="utf-8") as f:
                 f.write(f"# 📉 暗仓战报 - {timestamp}\n\n")
-                
-                if self.final_summary:
-                    f.write(f"> **市场总评**: {self.final_summary}\n\n")
-                
+                if self.final_summary: f.write(f"> **市场总评**: {self.final_summary}\n\n")
                 f.write(f"**最终股价**: ${self.current_price:.2f}\n\n")
                 
-                # 写入排行榜
                 f.write("## 🏆 最终排行榜\n| 排名 | 玩家 | 身份 | 资产 |\n|---|---|---|---|\n")
                 sorted_players = sorted(self.players.values(), key=lambda x: x.cash, reverse=True)
                 for i, p in enumerate(sorted_players):
                     icon = "💀" if p.cash <= 0 else "💰"
                     f.write(f"| {i+1} | {p.display_name} | {p.role} | {icon} ${p.cash:,.2f} |\n")
                 
-                # === 修复：写入交易员大厅记录 ===
                 f.write("\n## 💬 交易员大厅 (Chat Logs)\n")
                 if self.messages:
-                    for msg in self.messages:
-                        f.write(f"- {msg}\n")
-                else:
-                    f.write("- (本局无对话记录)\n")
+                    for msg in self.messages: f.write(f"- {msg}\n")
+                else: f.write("- (本局无对话记录)\n")
 
-                # 写入日志
                 f.write("\n## 📟 系统日志 (System Logs)\n")
-                for log in self.system_logs:
-                    f.write(f"- {log}\n")
+                for log in self.system_logs: f.write(f"- {log}\n")
 
-                # K线数据
                 f.write("\n## 📈 K线数据\n| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|---|---|---|---|---|---|\n")
                 for k in self.kline_data:
                     f.write(f"| {k['time']}h | {k['open']:.2f} | {k['high']:.2f} | {k['low']:.2f} | {k['close']:.2f} | {k['volume']} |\n")
-                    
-            print(f"战报已保存: {filename}")
-        except Exception as e:
-            print(f"Error saving report: {e}")
+        except Exception as e: print(f"Error saving report: {e}")
 
-
-    # 记得保留 prepare_next_round, calculate_short_fee, calculate_impact
+    # ... 辅助函数 ...
     def prepare_next_round(self):
         saved = {e: Player(e, p.display_name) for e, p in self.players.items()}
         self.reset()
@@ -333,7 +294,7 @@ class GameState:
 
     def calculate_short_fee(self):
         total_short = sum(abs(p.stock) for p in self.players.values() if p.stock < 0)
-        crowding = min(1.0, total_short / 1000000)
+        crowding = min(1.0, total_short / 100000)
         self.short_pressure = crowding
         return 0.05 + (0.45 * crowding)
 
@@ -343,11 +304,23 @@ class GameState:
         dist = limit - abs(current)
         return impact * (dist / limit) if dist > 0 else 0.0
 
+    # --- 玩家操作 (含冷却逻辑) ---
+    
+    def check_cooldown(self, player):
+        """检查是否处于3小时冷却期"""
+        # 冷却判定：当前时间 - 上次交易时间 < 3
+        if self.game_clock - player.last_trade_turn < 3:
+            wait_time = 3 - (self.game_clock - player.last_trade_turn)
+            return False, wait_time
+        return True, 0
+
     def purchase_intel(self, email, direction):
+        # 购买舆情 不受 冷却限制 (这是一种策略手段)
         from scripts.news_system import generate_news, format_news_for_display
         p = self.players[email]
         cost = 5000
-        status = p.get_account_status(self.current_price)
+        
+        status = p.get_account_status(self.current_price, self.game_clock)
         if "锁定" in status or "冻结" in status or "爆仓" in status: return f"❌ 拒绝：账户{status}"
         _, _, avail, _ = p.get_margin_info(self.current_price)
         if avail < cost: return f"❌ 资金不足"
@@ -371,12 +344,22 @@ class GameState:
         except: return "整数"
         if quantity <= 0: return "无效数量"
         p = self.players[email]
+        
+        # 【冷却检查】
+        is_ok, wait = self.check_cooldown(p)
+        if not is_ok:
+            return f"❄️ 交易冷却中！请等待 {wait} 小时后操作。"
+        
         cost = quantity * self.current_price * 1.05
         _, _, avail, _ = p.get_margin_info(self.current_price)
         if avail < cost: return f"资金不足"
+        
         p.cash -= cost
         p.stock += quantity
         self.current_volume += quantity
+        
+        # 更新交易时间
+        p.last_trade_turn = self.game_clock
         p.logs.append(f"买入 {quantity} 股")
         return "买入成功"
 
@@ -385,21 +368,47 @@ class GameState:
         except: return "整数"
         if quantity <= 0: return "无效数量"
         p = self.players[email]
+        
+        # 【冷却检查】
+        is_ok, wait = self.check_cooldown(p)
+        if not is_ok:
+            return f"❄️ 交易冷却中！请等待 {wait} 小时后操作。"
+        
         is_short = (p.stock - quantity) < 0
         fee_rate = self.calculate_short_fee() if is_short else 0.05
         if is_short:
             proceeds = quantity * self.current_price * (1 - fee_rate)
             if p.cash + proceeds < abs((p.stock - quantity) * self.current_price) * 1.5:
                 return "保证金不足"
+        
         proceeds = quantity * self.current_price * (1 - fee_rate)
         p.cash += proceeds
         p.stock -= quantity
         self.current_volume += quantity
+        
+        # 更新交易时间
+        p.last_trade_turn = self.game_clock
         p.logs.append(f"{'做空' if is_short else '卖出'} {quantity} 股")
         return "交易成功"
 
+    def take_loan(self, email, amount):
+        try: amount = int(amount)
+        except: return "整数"
+        if amount <= 0: return "无效金额"
+        p = self.players[email]
+        
+        max_loan = int(p.cash * 0.9)
+        if amount > max_loan: return f"额度不足 (上限 ${max_loan:,.0f})"
+        
+        repayment = amount * 1.30
+        p.cash += amount
+        p.debt += repayment
+        p.logs.append(f"💸 贷款 ${amount:,.0f} (还款额 ${repayment:,.0f})")
+        self.log(f"玩家 {p.display_name} 申请高杠杆贷款！")
+        return "贷款成功"
+
     def post_message(self, email, content):
         p = self.players[email]
-        tag = "【投资者】" if p.role == "操盘手" else "【投资者】"
+        tag = "【内幕】" if p.role == "操盘手" else "【投资者】"
         self.messages.append(f"{tag} {p.display_name}: {content}")
         return "发送成功"
