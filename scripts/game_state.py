@@ -183,45 +183,73 @@ class GameState:
     def end_game(self):
         self.phase = "结算阶段"
         
-        # 1. 资产结算
+        # 1. 资产结算 (扣除管理费)
+        retail_players = [] # 存储散户对象
+        mm_players = []     # 存储操盘手对象
+        
         for p in self.players.values():
             val = p.get_net_worth(self.current_price)
             fee = val * 0.10
             final_val = val - fee
+            
             p.cash = final_val
             p.stock = 0
             p.debt = 0
             p.logs.append(f"结算完成，管理费 ${fee:,.2f}，最终净值 ${final_val:,.2f}")
+            
+            if p.role == "操盘手":
+                mm_players.append(p)
+            else:
+                retail_players.append(p)
 
-        # 2. 寻找赢家和输家
-        sorted_players = sorted(self.players.values(), key=lambda x: x.cash, reverse=True)
-        winner = sorted_players[0] if sorted_players else None
+        # 2. 计算【收割指标】(Harvest Metrics)
+        # 统计散户的总初始资金 vs 总最终资金
+        initial_capital_per_person = 1000000.0
+        total_retail_loss = 0.0
         
-        # 计算破产人数 (资产 <= 0)
-        losers_count = sum(1 for p in sorted_players if p.cash <= 0)
+        for rp in retail_players:
+            # 只统计亏损的人，赚的人不算在"收割"里
+            loss = initial_capital_per_person - rp.cash
+            if loss > 0:
+                total_retail_loss += loss
+        
+        # 设定目标：必须收割至少 20% 的散户本金，或者固定金额 $1,500,000
+        # 这里使用动态目标：散户总人数 * 2万
+        harvest_target = len(retail_players) * 200000
+        mm_mission_success = total_retail_loss >= harvest_target
+        
+        # 3. 寻找表面赢家 (资产最高者)
+        sorted_players = sorted(self.players.values(), key=lambda x: x.cash, reverse=True)
+        top_player = sorted_players[0] if sorted_players else None
+        losers_count = sum(1 for p in sorted_players if p.cash < initial_capital_per_person)
+        
+        # 4. 构建传给 LLM 的数据包
+        # 我们把操盘手的特殊表现打包进去
+        game_stats = {
+            "start_price": self.history[0],
+            "end_price": self.current_price,
+            "top_player": top_player,
+            "losers_count": losers_count,
+            "total_retail_loss": total_retail_loss,
+            "harvest_target": harvest_target,
+            "mm_success": mm_mission_success,
+            "mm_names": [m.display_name for m in mm_players]
+        }
         
         # === DEBUG 输出 ===
-        start_p = self.history[0]
-        end_p = self.current_price
         print("-" * 40)
-        print(f"[DEBUG] 结局生成参数检查:")
-        print(f"Start Price: {start_p}")
-        print(f"End Price: {end_p}")
-        print(f"Winner: {winner.display_name if winner else 'None'}")
-        print(f"Losers Count: {losers_count}")
+        print(f"[DEBUG] 结算数据:")
+        print(f"散户总失血: ${total_retail_loss:,.2f} / 目标: ${harvest_target:,.2f}")
+        print(f"操盘手任务: {'✅ 达标' if mm_mission_success else '❌ 失败'}")
         print("-" * 40)
-        # =================
-        
-        # 3. LLM 结局分析
+
+        # 5. LLM 结局分析
         from scripts.news_system import generate_end_game_summary
-        if winner:
-            winner_info = {"name": winner.display_name, "cash": winner.cash, "role": winner.role}
-            self.final_summary = generate_end_game_summary(
-                start_p, end_p, winner_info, losers_count
-            )
+        if top_player:
+            self.final_summary = generate_end_game_summary(game_stats)
             self.system_logs.append(f"📝 {self.final_summary}")
         
-        self.log("游戏结束，所有资产已清算。")
+        self.log("游戏结束，收割完成。")
         self.save_game_report()
 
     def take_loan(self, email, amount):
@@ -251,6 +279,8 @@ class GameState:
         
         return "贷款成功，资金已到账"
 
+
+
     def save_game_report(self):
         save_dir = "savedata"
         if not os.path.exists(save_dir): os.makedirs(save_dir)
@@ -260,25 +290,41 @@ class GameState:
             with open(filename, "w", encoding="utf-8") as f:
                 f.write(f"# 📉 暗仓战报 - {timestamp}\n\n")
                 
-                # 写入 LLM 总结
                 if self.final_summary:
                     f.write(f"> **市场总评**: {self.final_summary}\n\n")
                 
                 f.write(f"**最终股价**: ${self.current_price:.2f}\n\n")
-                f.write("## 🏆 排行榜\n| 排名 | 玩家 | 身份 | 资产 |\n|---|---|---|---|\n")
+                
+                # 写入排行榜
+                f.write("## 🏆 最终排行榜\n| 排名 | 玩家 | 身份 | 资产 |\n|---|---|---|---|\n")
                 sorted_players = sorted(self.players.values(), key=lambda x: x.cash, reverse=True)
                 for i, p in enumerate(sorted_players):
                     icon = "💀" if p.cash <= 0 else "💰"
                     f.write(f"| {i+1} | {p.display_name} | {p.role} | {icon} ${p.cash:,.2f} |\n")
                 
-                # ... K线数据和日志保持不变 ...
+                # === 修复：写入交易员大厅记录 ===
+                f.write("\n## 💬 交易员大厅 (Chat Logs)\n")
+                if self.messages:
+                    for msg in self.messages:
+                        f.write(f"- {msg}\n")
+                else:
+                    f.write("- (本局无对话记录)\n")
+
+                # 写入日志
+                f.write("\n## 📟 系统日志 (System Logs)\n")
+                for log in self.system_logs:
+                    f.write(f"- {log}\n")
+
+                # K线数据
                 f.write("\n## 📈 K线数据\n| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|---|---|---|---|---|---|\n")
                 for k in self.kline_data:
                     f.write(f"| {k['time']}h | {k['open']:.2f} | {k['high']:.2f} | {k['low']:.2f} | {k['close']:.2f} | {k['volume']} |\n")
+                    
+            print(f"战报已保存: {filename}")
         except Exception as e:
             print(f"Error saving report: {e}")
 
-    # ... 其他原有方法 (purchase_intel, buy_stock, sell_stock 等) 保持不变 ...
+
     # 记得保留 prepare_next_round, calculate_short_fee, calculate_impact
     def prepare_next_round(self):
         saved = {e: Player(e, p.display_name) for e, p in self.players.items()}

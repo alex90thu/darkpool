@@ -2,13 +2,14 @@ import gradio as gr
 from shared import GAME 
 from backend import (
     get_dashboard_info, 
+    get_admin_dashboard_info, 
     admin_start, 
     admin_skip_time, 
     admin_skip_to_end, 
     admin_restart_game
 )
 
-# === 自定义 CSS (保留之前的彭博终端风格) ===
+# === CSS 修复：强制滚动条 & 颜色 ===
 custom_css = """
 .dark-terminal {
     background-color: #161a25 !important;
@@ -18,8 +19,7 @@ custom_css = """
     margin-bottom: 20px !important;
 }
 .dark-terminal h1, .dark-terminal h2, .dark-terminal h3, 
-.dark-terminal p, .dark-terminal span, .dark-terminal label, 
-.dark-terminal .prose {
+.dark-terminal p, .dark-terminal span, .dark-terminal label {
     color: #e0e0e0 !important;
 }
 .buy-btn { background-color: #2E7D32 !important; color: white !important; }
@@ -28,12 +28,16 @@ custom_css = """
 .loan-btn { background-color: #6A1B9A !important; color: white !important; }
 .msg-btn { background-color: #455A64 !important; color: white !important; }
 button { border-radius: 8px !important; }
+
+/* === 核心修复：强制显示滚动条并固定高度 === */
+.scroll-box textarea {
+    height: 300px !important;     /* 固定高度 */
+    max_height: 300px !important; 
+    overflow-y: scroll !important; /* 强制显示垂直滚动条 */
+}
 """
 
-# ==========================================
-# 逻辑函数包装 (保持不变)
-# ==========================================
-
+# === 逻辑保持不变 ===
 def login_ui(email, name):
     if not email or not name: return gr.update(visible=True), gr.update(visible=False), "请输入信息"
     if email not in GAME.players:
@@ -42,22 +46,19 @@ def login_ui(email, name):
     return gr.update(visible=False), gr.update(visible=True), f"欢迎, {name}"
 
 def update_dashboard(email):
-    status, price, trend, logs, messages, leaderboard, plot, buy_hint, sell_hint = get_dashboard_info(GAME, email)
-    return (
-        status, price, trend, logs, messages, leaderboard, plot, 
-        gr.update(visible=bool(leaderboard)),
-        gr.update(info=buy_hint),
-        gr.update(info=sell_hint)
-    )
+    # backend 返回 8 个数据，注意不需要 visible 更新了
+    status, price, trend, logs, messages, leaderboard_df, plot, hint_text = get_dashboard_info(GAME, email)
+    return status, price, trend, logs, messages, leaderboard_df, plot, hint_text
 
 def common_action(func, email, *args):
     if GAME.phase != "交易阶段":
         res = get_dashboard_info(GAME, email) 
-        return *res[:7], gr.update(visible=False), gr.update(), gr.update(), "❌ 交易未开启"
+        return *res[:7], res[7], "❌ 交易未开启"
     result_text = func(email, *args)
     res = get_dashboard_info(GAME, email)
-    return *res[:7], gr.update(visible=False), gr.update(info=res[7]), gr.update(info=res[8]), result_text
+    return *res[:7], res[7], result_text
 
+# 动作绑定
 def buy_action(email, qty): return common_action(GAME.buy_stock, email, qty)
 def sell_action(email, qty): return common_action(GAME.sell_stock, email, qty)
 def intel_action(email, direction): return common_action(GAME.purchase_intel, email, direction)
@@ -65,19 +66,19 @@ def loan_action(email, amount): return common_action(GAME.take_loan, email, amou
 def post_message_action(email, msg): 
     if not msg.strip(): 
         res = get_dashboard_info(GAME, email)
-        return *res[:7], gr.update(visible=False), gr.update(), gr.update(), "内容为空"
+        return *res[:7], res[7], "内容为空"
     return common_action(GAME.post_message, email, msg)
 
+def update_admin_dashboard():
+    return get_admin_dashboard_info(GAME)
 
 # ==========================================
 # 界面 1: 玩家端 (Public UI) - Port 8001
 # ==========================================
-with gr.Blocks(title="暗仓: 看不见的手", css=custom_css) as public_app:
+with gr.Blocks(title="暗仓: 看不见的手") as public_app:
     user_email_state = gr.State("") 
-    
     gr.Markdown("# 📉 暗仓 (Dark Pool) - 模拟交易终端")
     
-    # 登录区
     with gr.Group(visible=True) as login_group:
         with gr.Row():
             email_input = gr.Textbox(label="电子邮箱", placeholder="user@test.com")
@@ -85,10 +86,7 @@ with gr.Blocks(title="暗仓: 看不见的手", css=custom_css) as public_app:
         login_btn = gr.Button("接入交易网络", variant="primary")
         login_msg = gr.Markdown("")
 
-    # 游戏区
     with gr.Group(visible=False) as game_group:
-        
-        # 黑色终端风格显示区
         with gr.Group(elem_classes="dark-terminal"):
             with gr.Row():
                 with gr.Column(scale=2): status_display = gr.Markdown("加载中...")
@@ -97,45 +95,48 @@ with gr.Blocks(title="暗仓: 看不见的手", css=custom_css) as public_app:
                 with gr.Column(scale=3): kline_chart = gr.Plot(label="Market Data")
                 with gr.Column(scale=1): trend_display = gr.Markdown("情报加载中...")
         
-        # 白色操作区
         with gr.Group():
-            gr.Markdown("### 🕹️ 交易指令台")
+            hint_display = gr.Markdown("💡 提示: 等待行情更新...", elem_id="hint-box")
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("#### 🟢 买入 (Long)")
-                    buy_qty_box = gr.Number(label="数量", value=100)
-                    buy_btn = gr.Button("买入股票", elem_classes="buy-btn")
+                    buy_qty_box = gr.Number(label="买入数量", value=100)
+                    buy_btn = gr.Button("买入 (Long)", elem_classes="buy-btn")
                 with gr.Column(scale=1):
-                    gr.Markdown("#### 🔴 卖出 (Short)")
-                    sell_qty_box = gr.Number(label="数量", value=100)
-                    sell_btn = gr.Button("卖出/平仓", elem_classes="sell-btn")
+                    sell_qty_box = gr.Number(label="卖出数量", value=100)
+                    sell_btn = gr.Button("卖出/做空 (Short)", elem_classes="sell-btn")
                 with gr.Column(scale=1):
-                    gr.Markdown("#### 📢 舆情 ($5k)")
                     intel_direction = gr.Radio(["看涨", "看跌"], label="方向", value="看涨")
-                    intel_btn = gr.Button("购买舆情", elem_classes="intel-btn")
+                    intel_btn = gr.Button("购买舆情 ($5k)", elem_classes="intel-btn")
                 with gr.Column(scale=1):
-                    gr.Markdown("#### 🏦 融资 (30%)")
-                    loan_amount = gr.Number(label="金额", value=10000)
-                    loan_btn = gr.Button("申请贷款", elem_classes="loan-btn")
+                    loan_amount = gr.Number(label="贷款金额", value=10000)
+                    loan_btn = gr.Button("申请高利贷 (30%)", elem_classes="loan-btn")
             
             action_result = gr.Markdown("准备就绪...")
             gr.Markdown("---")
             with gr.Row():
                 with gr.Column(scale=2):
                     gr.Markdown("### 💬 交易员大厅")
-                    message_display = gr.TextArea(show_label=False, interactive=False, lines=8)
+                    # 应用 .scroll-box 样式
+                    message_display = gr.TextArea(show_label=False, interactive=False, elem_classes="scroll-box")
                     with gr.Row():
                         message_input = gr.Textbox(show_label=False, placeholder="输入消息...", scale=4)
                         send_msg_btn = gr.Button("发送", scale=1, elem_classes="msg-btn")
                 with gr.Column(scale=1):
                     gr.Markdown("### 📟 News Ticker")
-                    log_display = gr.TextArea(show_label=False, interactive=False, lines=10)
+                    # 应用 .scroll-box 样式
+                    log_display = gr.TextArea(show_label=False, interactive=False, elem_classes="scroll-box")
             
-            leaderboard_display = gr.Markdown("", visible=False)
+            # 排行榜始终可见，解决跳动问题
+            gr.Markdown("### 🏆 实时/最终 排行榜")
+            leaderboard_table = gr.Dataframe(
+                headers=["排名", "玩家", "身份", "资产", "状态"],
+                visible=True, # 始终可见，为空时只显示表头
+                interactive=False
+            )
             timer = gr.Timer(2)
 
-    # 玩家端绑定
-    refresh_outs = [status_display, price_display, trend_display, log_display, message_display, leaderboard_display, kline_chart, leaderboard_display, buy_qty_box, sell_qty_box]
+    # Output 移除了 visible update
+    refresh_outs = [status_display, price_display, trend_display, log_display, message_display, leaderboard_table, kline_chart, hint_display]
     common_outs = [*refresh_outs, action_result]
 
     login_btn.click(login_ui, [email_input, name_input], [login_group, game_group, login_msg]).then(
@@ -152,40 +153,69 @@ with gr.Blocks(title="暗仓: 看不见的手", css=custom_css) as public_app:
 
 
 # ==========================================
-# 界面 2: 管理员端 (Admin UI) - Port 1008
+# 界面 2: 管理员端 (Admin UI) - Port 7001
 # ==========================================
-with gr.Blocks(title="暗仓: 上帝控制台", theme=gr.themes.Soft()) as admin_app:
+with gr.Blocks(title="暗仓: 上帝控制台", css=custom_css) as admin_app:
     gr.Markdown("# 🛠️ 上帝控制台 (Admin Panel)")
-    gr.Markdown("警告：此页面拥有最高权限，请勿泄露给玩家。")
     
     with gr.Row():
-        admin_start_btn = gr.Button("🚀 强制开始游戏", variant="primary")
-        admin_restart_btn = gr.Button("🔄 重置/开启新一轮", variant="secondary")
-    
-    with gr.Row():
-        admin_skip_btn = gr.Button("⏭️ 跳过 1 小时")
-        admin_skip_all_btn = gr.Button("⏩ 快进至结局 (自动结算)")
-        
-    admin_out = gr.TextArea(label="执行结果", interactive=False, lines=10)
-    
-    # 管理员端绑定 (只负责执行命令，不需要刷新复杂界面)
-    admin_start_btn.click(lambda: admin_start(), outputs=admin_out)
-    admin_skip_btn.click(lambda: admin_skip_time(), outputs=admin_out)
-    admin_skip_all_btn.click(lambda: admin_skip_to_end(), outputs=admin_out)
-    admin_restart_btn.click(lambda: admin_restart_game(), outputs=admin_out)
+        with gr.Column(scale=3):
+            admin_kline = gr.Plot(label="全局行情监控")
+        with gr.Column(scale=1):
+            admin_status = gr.Markdown("状态: ---")
+            admin_start_btn = gr.Button("🚀 强制开始游戏", variant="primary")
+            admin_skip_btn = gr.Button("⏭️ 跳过 1 小时")
+            admin_skip_all_btn = gr.Button("⏩ 快进至结局")
+            admin_restart_btn = gr.Button("🔄 重置/新游戏")
+            admin_out_text = gr.Markdown("") 
 
+    with gr.Row():
+        with gr.Column(scale=1):
+            gr.Markdown("### 👥 玩家资产")
+            admin_player_table = gr.Dataframe(
+                headers=["代号", "邮箱", "身份", "现金", "持仓", "净值", "状态"],
+                interactive=False
+            )
+        with gr.Column(scale=1):
+            gr.Markdown("### 📟 日志 & 舆情")
+            # 应用 .scroll-box 样式
+            admin_logs = gr.TextArea(show_label=False, interactive=False, elem_classes="scroll-box")
+        with gr.Column(scale=1):
+            gr.Markdown("### 💬 玩家对话监控")
+            # 新增：管理员查看对话
+            admin_messages = gr.TextArea(show_label=False, interactive=False, elem_classes="scroll-box")
+    
+    admin_timer = gr.Timer(2)
+    
+    # 绑定操作
+    admin_outputs = [admin_kline, admin_player_table, admin_logs, admin_messages, admin_status]
+    
+    admin_start_btn.click(lambda: admin_start(), outputs=admin_out_text).then(update_admin_dashboard, outputs=admin_outputs)
+    admin_skip_btn.click(lambda: admin_skip_time(), outputs=admin_out_text).then(update_admin_dashboard, outputs=admin_outputs)
+    admin_skip_all_btn.click(lambda: admin_skip_to_end(), outputs=admin_out_text).then(update_admin_dashboard, outputs=admin_outputs)
+    admin_restart_btn.click(lambda: admin_restart_game(), outputs=admin_out_text).then(update_admin_dashboard, outputs=admin_outputs)
+    
+    admin_timer.tick(update_admin_dashboard, outputs=admin_outputs)
 
 # ==========================================
-# 双端口启动逻辑
+# 启动逻辑
 # ==========================================
 if __name__ == "__main__":
     print("正在启动双端服务...")
     print("1. 玩家端 (Public): http://localhost:8001")
     print("2. 管理端 (Admin):  http://localhost:7001 (请保密)")
     
-    # 关键参数: prevent_thread_lock=True
-    # 这让 admin_app 在后台启动，不会阻塞代码执行，从而让 public_app 也能接着启动
-    admin_app.launch(server_name="0.0.0.0", server_port=7001,share=True, prevent_thread_lock=True)
+    admin_app.launch(
+        server_name="0.0.0.0", 
+        server_port=7001, 
+        prevent_thread_lock=True, 
+        share=False,
+        theme=gr.themes.Soft()
+    )
     
-    # 玩家端作为主进程阻塞运行
-    public_app.launch(server_name="0.0.0.0", server_port=8001, share=True)
+    public_app.launch(
+        server_name="0.0.0.0", 
+        server_port=8001, 
+        share=False, 
+        css=custom_css
+    )
