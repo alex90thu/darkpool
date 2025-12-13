@@ -1,0 +1,299 @@
+import random
+import math
+import os  # 新增
+from datetime import datetime
+
+class Player:
+    def __init__(self, email, display_name):
+        self.email = email
+        self.display_name = display_name
+        self.role = "散户"
+        self.cash = 100000.0
+        self.stock = 0
+        self.debt = 0.0
+        self.logs = []
+        self.last_event = None 
+
+    def get_net_worth(self, current_price):
+        """计算净资产"""
+        stock_value = self.stock * current_price
+        return self.cash + stock_value - self.debt
+
+    def get_margin_info(self, current_price):
+        """计算保证金详情"""
+        if self.stock >= 0:
+            return 0.0, 0.0, self.cash, 0.0
+        
+        short_val = abs(self.stock * current_price)
+        frozen_cash = short_val * 1.5
+        available_cash = self.cash - frozen_cash
+        equity = self.cash - short_val
+        risk_ratio = equity / short_val if short_val > 0 else 999.0
+        
+        return short_val, frozen_cash, max(0, available_cash), risk_ratio
+
+    def get_account_status(self, current_price):
+        """返回账户的当前状态标签"""
+        if self.last_event == "LIQUIDATED":
+            return "☠️ 刚刚爆仓"
+        
+        if self.stock >= 0:
+            return "✅ 正常"
+        
+        short_val, frozen, avail, risk = self.get_margin_info(current_price)
+        
+        if risk < 1.15: 
+            return "🆘 濒临强平"
+        elif risk < 1.35:
+            return "⚠️ 保证金告急"
+        elif avail < 5000:
+            return "🔒 资产冻结"
+        else:
+            return "📉 做空持仓中"
+
+class GameState:
+    def __init__(self):
+        self.players = {}
+        self.reset()
+
+    def reset(self):
+        self.is_running = False
+        self.phase = "报名阶段"
+        self.game_clock = 0
+        self.system_logs = []
+        self.players = {}
+        self.messages = []
+        
+        self.base_price = 100.0
+        self.current_price = 100.0
+        self.hourly_trend = 0.0 
+        self.current_momentum = 0.0 
+        self.volatility_limit = 0.30 
+        self.history = [100.0]
+        self.short_pressure = 0.0
+
+    def log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        self.system_logs.append(entry)
+        # 注意：为了保存完整战报，这里不再限制日志长度，或者在保存时只取最后一部分
+        # 但为了内存考虑，还是保留限制，但在保存前我们不删减历史记录可能会更好
+        # 简单起见，这里依然保留限制，防止内存溢出。
+        if len(self.system_logs) > 200: # 扩大一点上限
+            self.system_logs.pop(0)
+
+    def register(self, email, name):
+        if email in self.players: return False, "已注册"
+        new_player = Player(email, name)
+        if self.is_running: new_player.role = "散户"
+        self.players[email] = new_player
+        return True, "注册成功"
+
+    def start_game(self):
+        if len(self.players) < 1: return "人数不足"
+        self.is_running = True
+        self.phase = "交易阶段"
+        self.game_clock = 0
+        self.hourly_trend = random.uniform(-0.02, 0.02)
+        
+        emails = list(self.players.keys())
+        num_mm = max(1, int(len(emails) * 0.1))
+        mm = random.sample(emails, num_mm)
+        for e in self.players:
+            self.players[e].role = "操盘手" if e in mm else "散户"
+        
+        self.log(f"开盘！共{len(self.players)}人入场。")
+        return "游戏开始"
+
+    def next_hour(self):
+        if not self.is_running or self.game_clock >= 12: return
+
+        self.game_clock += 1
+        
+        noise = random.uniform(-0.01, 0.01)
+        change = self.hourly_trend + self.current_momentum + noise
+        change = max(-0.5, min(0.5, change))
+        self.current_price *= (1 + change)
+        self.current_momentum = 0.0 
+        self.history.append(self.current_price)
+        
+        maintenance_margin = 1.10
+        for p in self.players.values():
+            p.last_event = None 
+            if p.stock < 0:
+                short_val, frozen, avail, risk = p.get_margin_info(self.current_price)
+                if risk < maintenance_margin:
+                    self.liquidate_player(p)
+                elif risk < 1.3:
+                    p.logs.append(f"⚠️ 警告：保证金水平({risk:.2f})过低！")
+
+        self.log(f"第 {self.game_clock} 小时收盘，股价 ${self.current_price:.2f}")
+        if self.game_clock >= 12: self.end_game()
+
+    def liquidate_player(self, player):
+        quantity = abs(player.stock)
+        cost = quantity * self.current_price
+        player.stock = 0
+        player.cash -= cost 
+        player.last_event = "LIQUIDATED" 
+        msg = f"☠️ 爆仓通知：系统强制买回 {quantity} 股，扣除 ${cost:,.2f}。"
+        player.logs.append(msg)
+        self.log(f"玩家 {player.display_name} 爆仓强平！(市场动能+5%)")
+        self.current_momentum += 0.05 
+
+    def end_game(self):
+        self.phase = "结算阶段"
+        for p in self.players.values():
+            val = p.get_net_worth(self.current_price)
+            fee = val * 0.10
+            p.cash = val - fee
+            p.stock = 0
+            p.logs.append(f"结算完成，扣除管理费 ${fee:,.2f}")
+        
+        self.log("游戏结束，所有资产已清算。")
+        
+        # --- 触发保存战报 ---
+        self.save_game_report()
+
+    def save_game_report(self):
+        """【新增】保存游戏战报到 Markdown 文件"""
+        # 1. 确保目录存在
+        save_dir = "savedata"
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+            
+        # 2. 生成文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{save_dir}/game_report_{timestamp}.md"
+        
+        # 3. 构建内容
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                # 标题
+                f.write(f"# 📉 暗仓游戏战报 - {timestamp}\n\n")
+                f.write(f"**总回合数**: 12小时 | **参与人数**: {len(self.players)} | **最终股价**: ${self.current_price:.2f}\n\n")
+                
+                # --- 最终排行榜 ---
+                f.write("## 🏆 最终排行榜 (已扣除10%管理费)\n")
+                f.write("| 排名 | 代号 | 邮箱 | 身份 | 最终资产 | 状态 |\n")
+                f.write("|---|---|---|---|---|---|\n")
+                
+                sorted_players = sorted(self.players.values(), key=lambda x: x.cash, reverse=True)
+                for idx, p in enumerate(sorted_players):
+                    status = "💀 破产" if p.cash <= 0 else "💰 盈利"
+                    if p.last_event == "LIQUIDATED": status = "☠️ 爆仓离场"
+                    
+                    f.write(f"| {idx+1} | {p.display_name} | {p.email} | {p.role} | ${p.cash:,.2f} | {status} |\n")
+                f.write("\n")
+                
+                # --- 实时讨论记录 ---
+                f.write("## 💬 舆论场记录 (Chat History)\n")
+                if not self.messages:
+                    f.write("*本局游戏无交流记录*\n")
+                else:
+                    for msg in self.messages:
+                        # 简单的格式化，去掉多余换行
+                        clean_msg = msg.strip().replace('\n', ' ')
+                        f.write(f"- {clean_msg}\n")
+                f.write("\n")
+                
+                # --- 系统运行日志 ---
+                f.write("## 📟 市场关键事件 (System Logs)\n")
+                for log in self.system_logs:
+                    f.write(f"- {log}\n")
+                
+            self.log(f"✅ 战报已自动保存至: {filename}")
+            print(f"Game report saved: {filename}")
+            
+        except Exception as e:
+            err_msg = f"❌ 战报保存失败: {str(e)}"
+            self.log(err_msg)
+            print(err_msg)
+
+    def prepare_next_round(self):
+        saved = {e: Player(e, p.display_name) for e, p in self.players.items()}
+        self.reset()
+        self.players = saved
+
+    def calculate_short_fee(self):
+        total_short = sum(abs(p.stock) for p in self.players.values() if p.stock < 0)
+        crowding = min(1.0, total_short / 100000)
+        self.short_pressure = crowding
+        return 0.05 + (0.45 * crowding)
+
+    def calculate_impact(self, current, impact, limit):
+        target = current + impact
+        if abs(target) < abs(current) or (target * current < 0): return impact
+        dist = limit - abs(current)
+        return impact * (dist / limit) if dist > 0 else 0.0
+
+    # --- 玩家操作 ---
+    def purchase_intel(self, email, direction):
+        p = self.players[email]
+        cost = 5000
+        
+        status = p.get_account_status(self.current_price)
+        if "锁定" in status or "冻结" in status or "爆仓" in status:
+            return f"❌ 操作拒绝：账户处于【{status}】状态"
+        
+        _, _, avail, _ = p.get_margin_info(self.current_price)
+        if avail < cost:
+            return f"❌ 资金不足：可用资金 ${avail:,.2f} (其余为保证金)，需 $5,000"
+
+        p.cash -= cost
+        base = 0.15 if p.role == "操盘手" else 0.05
+        impact = base * (1 if direction == "看涨" else -1)
+        actual = self.calculate_impact(self.current_momentum, impact, self.volatility_limit)
+        self.current_momentum += actual
+        
+        p.logs.append(f"购买{direction}舆情，造成 {actual*100:+.2f}% 动能")
+        self.system_logs.append(f"{'🚀' if direction=='看涨' else '📉'} 突发舆情介入市场！")
+        return "舆情购买成功"
+
+    def buy_stock(self, email, quantity):
+        try: quantity = int(quantity)
+        except: return "请输入整数"
+        if quantity <= 0: return "无效数量"
+        
+        p = self.players[email]
+        cost = quantity * self.current_price * 1.05
+        
+        _, _, avail, _ = p.get_margin_info(self.current_price)
+        if avail < cost: return f"可用资金不足 (需 ${cost:,.2f})"
+        
+        p.cash -= cost
+        p.stock += quantity
+        p.logs.append(f"买入 {quantity} 股")
+        return "买入成功"
+
+    def sell_stock(self, email, quantity):
+        try: quantity = int(quantity)
+        except: return "请输入整数"
+        if quantity <= 0: return "无效数量"
+        
+        p = self.players[email]
+        is_short = (p.stock - quantity) < 0
+        fee_rate = self.calculate_short_fee() if is_short else 0.05
+        
+        if is_short:
+            proceeds = quantity * self.current_price * (1 - fee_rate)
+            new_cash = p.cash + proceeds
+            new_stock = p.stock - quantity
+            new_short_val = abs(new_stock * self.current_price)
+            required_cash = new_short_val * 1.5 
+            
+            if new_cash < required_cash:
+                shortfall = required_cash - new_cash
+                return f"保证金不足！还需要补充 ${shortfall:,.2f} 现金才能做空此数量。"
+
+        proceeds = quantity * self.current_price * (1 - fee_rate)
+        p.cash += proceeds
+        p.stock -= quantity
+        p.logs.append(f"{'做空' if is_short else '卖出'} {quantity} 股，到账 ${proceeds:,.2f}")
+        return "交易成功"
+
+    def post_message(self, email, content):
+        p = self.players[email]
+        tag = "【内幕】" if p.role == "操盘手" else "【投资者】"
+        self.messages.append(f"{tag} {p.display_name}: {content}")
+        return "发送成功"

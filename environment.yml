@@ -1,0 +1,6 @@
+name: darkpool
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+prefix: /home/guozehua/miniconda3/envs/darkpool
