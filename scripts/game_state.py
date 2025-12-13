@@ -409,6 +409,6 @@ class GameState:
 
     def post_message(self, email, content):
         p = self.players[email]
-        tag = "【内幕】" if p.role == "操盘手" else "【投资者】"
+        tag = "【投资者】" if p.role == "操盘手" else "【投资者】"
         self.messages.append(f"{tag} {p.display_name}: {content}")
         return "发送成功"

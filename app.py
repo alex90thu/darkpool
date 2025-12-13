@@ -35,9 +35,18 @@ button { border-radius: 8px !important; }
     max_height: 300px !important; 
     overflow-y: scroll !important; /* 强制显示垂直滚动条 */
 }
+
+/* 添加刷新按钮样式 */
+.refresh-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 100;
+}
 """
 
 # === 逻辑保持不变 ===
+
 def login_ui(email, name):
     if not email or not name: return gr.update(visible=True), gr.update(visible=False), "请输入信息"
     if email not in GAME.players:
@@ -45,9 +54,28 @@ def login_ui(email, name):
         if not success: return gr.update(visible=True), gr.update(visible=False), message
     return gr.update(visible=False), gr.update(visible=True), f"欢迎, {name}"
 
+# 跟踪上次更新K线图的时间
+last_kline_update = {"hour": -1, "plot": None}
+
+def draw_kline_chart(game_instance):
+    from backend import draw_kline_chart as backend_draw_kline
+    return backend_draw_kline(game_instance)
+
 def update_dashboard(email):
     # backend 返回 8 个数据，注意不需要 visible 更新了
-    status, price, trend, logs, messages, leaderboard_df, plot, hint_text = get_dashboard_info(GAME, email)
+    status, price, trend, logs, messages, leaderboard_df, _, hint_text = get_dashboard_info(GAME, email)
+    
+    # 只有当游戏时间发生变化时才更新K线图，否则使用缓存的图表
+    current_hour = GAME.game_clock
+    if current_hour != last_kline_update["hour"] or last_kline_update["plot"] is None:
+        # 更新K线图并缓存
+        plot = draw_kline_chart(GAME)
+        last_kline_update["hour"] = current_hour
+        last_kline_update["plot"] = plot
+    else:
+        # 使用缓存的K线图
+        plot = last_kline_update["plot"]
+    
     return status, price, trend, logs, messages, leaderboard_df, plot, hint_text
 
 def common_action(func, email, *args):
@@ -87,6 +115,11 @@ with gr.Blocks(title="暗仓: 看不见的手") as public_app:
         login_msg = gr.Markdown("")
 
     with gr.Group(visible=False) as game_group:
+        # 添加刷新按钮到右上角
+        with gr.Row():
+            gr.Markdown("## 📉 暗仓 (Dark Pool) - 模拟交易终端")
+            refresh_btn = gr.Button("🔄 刷新", elem_classes="refresh-btn")
+        
         with gr.Group(elem_classes="dark-terminal"):
             with gr.Row():
                 with gr.Column(scale=2): status_display = gr.Markdown("加载中...")
@@ -133,9 +166,7 @@ with gr.Blocks(title="暗仓: 看不见的手") as public_app:
                 visible=True, # 始终可见，为空时只显示表头
                 interactive=False
             )
-            timer = gr.Timer(2)
-
-    # Output 移除了 visible update
+            # Output 移除了 visible update
     refresh_outs = [status_display, price_display, trend_display, log_display, message_display, leaderboard_table, kline_chart, hint_display]
     common_outs = [*refresh_outs, action_result]
 
@@ -143,7 +174,8 @@ with gr.Blocks(title="暗仓: 看不见的手") as public_app:
         fn=lambda e: e, inputs=email_input, outputs=user_email_state
     ).then(update_dashboard, user_email_state, refresh_outs)
     
-    timer.tick(update_dashboard, user_email_state, refresh_outs)
+    # 手动刷新按钮，替代原来的定时器
+    refresh_btn.click(update_dashboard, user_email_state, refresh_outs)
     
     buy_btn.click(buy_action, [user_email_state, buy_qty_box], common_outs)
     sell_btn.click(sell_action, [user_email_state, sell_qty_box], common_outs)
@@ -156,7 +188,10 @@ with gr.Blocks(title="暗仓: 看不见的手") as public_app:
 # 界面 2: 管理员端 (Admin UI) - Port 7001
 # ==========================================
 with gr.Blocks(title="暗仓: 上帝控制台", css=custom_css) as admin_app:
-    gr.Markdown("# 🛠️ 上帝控制台 (Admin Panel)")
+    with gr.Group():
+        with gr.Row():
+            gr.Markdown("# 🛠️ 上帝控制台 (Admin Panel)")
+            admin_refresh_btn = gr.Button("🔄 刷新", elem_classes="refresh-btn")
     
     with gr.Row():
         with gr.Column(scale=3):
@@ -185,8 +220,6 @@ with gr.Blocks(title="暗仓: 上帝控制台", css=custom_css) as admin_app:
             # 新增：管理员查看对话
             admin_messages = gr.TextArea(show_label=False, interactive=False, elem_classes="scroll-box")
     
-    admin_timer = gr.Timer(2)
-    
     # 绑定操作
     admin_outputs = [admin_kline, admin_player_table, admin_logs, admin_messages, admin_status]
     
@@ -195,7 +228,8 @@ with gr.Blocks(title="暗仓: 上帝控制台", css=custom_css) as admin_app:
     admin_skip_all_btn.click(lambda: admin_skip_to_end(), outputs=admin_out_text).then(update_admin_dashboard, outputs=admin_outputs)
     admin_restart_btn.click(lambda: admin_restart_game(), outputs=admin_out_text).then(update_admin_dashboard, outputs=admin_outputs)
     
-    admin_timer.tick(update_admin_dashboard, outputs=admin_outputs)
+    # 管理员端也使用手动刷新
+    admin_refresh_btn.click(update_admin_dashboard, outputs=admin_outputs)
 
 # ==========================================
 # 启动逻辑
