@@ -14,6 +14,7 @@
 - 留言板交流系统
 - 排行榜竞争机制
 - AI驱动的实时新闻生成
+- URL Token自动登录系统
 
 ## 技术架构
 
@@ -35,10 +36,12 @@ darkpool/
 ├── requirements.txt    # Python依赖包列表
 ├── environment.yml     # Conda环境配置
 ├── README.md           # 项目说明文档
+├── assets/             # 静态资源目录
+│   └── login.png       # 登录页面图片 （自行添加）
 ├── scripts/            # 功能模块目录
 │   ├── game_state.py   # 核心游戏逻辑和状态管理
 │   ├── player_manager.py # 玩家数据结构定义
-│   ├── ui_manager.py   # 界面管理
+│   ├── ui_manager.py   # 界面管理（已弃用，逻辑整合到backend.py中）
 │   ├── admin_functions.py # 管理员功能
 │   └── news_system.py  # 新闻系统
 └── savedata/           # 游戏报告保存目录
@@ -89,7 +92,7 @@ python app.py
 
 启动后将同时启动两个服务：
 - 玩家端 (Public): http://localhost:8001
-- 管理端 (Admin):  http://localhost:7001 (请保密)
+- 管理端 (Admin):  http://localhost:8002 (请保密)
 
 ## 游戏规则
 
@@ -106,6 +109,7 @@ python app.py
 - 融资融券：可以申请贷款，但需支付30%利息
 - 结算机制：游戏结束后按最终资产排名，并收取10%管理费
 - 强制平仓：当保证金比例低于110%时会被强制平仓
+- 交易冷却：每次交易后需要等待3小时才能进行下一次交易
 
 ### 舆情系统
 
@@ -126,6 +130,18 @@ python app.py
 - 跳过1小时
 - 快进至游戏结束
 - 重新开始游戏
+
+## 登录系统
+
+本系统支持两种登录方式：
+
+### 手动登录
+玩家输入邮箱和操盘代号进行登录。
+
+### URL Token自动登录
+1. 玩家首次登录后，系统会生成一个专属免密登录链接
+2. 玩家可以将该链接保存为书签或收藏
+3. 下次访问时直接使用该链接即可自动登录
 
 ## 开发说明
 
