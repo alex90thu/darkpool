@@ -20,8 +20,8 @@
 
 ### 核心组件
 
-- **后端**: Python + Gradio
-- **前端**: Gradio自动生成Web界面
+- **后端**: Python + Streamlit/Gradio 提供交互
+- **前端**: Streamlit 页面（默认），保留 Gradio 入口作为备选
 - **图表**: Plotly交互式K线图
 - **AI**: 支持大型语言模型生成实时财经新闻
 - **数据存储**: 内存存储（单轮游戏生命周期）
@@ -30,7 +30,8 @@
 
 ```
 darkpool/
-├── app.py              # 主应用入口，包含双界面（玩家端和管理员端）
+├── streamlit_app.py    # 新版 Streamlit 前端（玩家端 + 管理端）
+├── app.py              # 旧版 Gradio 入口（保留）
 ├── backend.py          # 后端逻辑封装和数据接口
 ├── shared.py           # 全局共享的游戏状态实例
 ├── requirements.txt    # Python依赖包列表
@@ -58,8 +59,8 @@ darkpool/
 conda env create -f environment.yml
 conda activate darkpool
 
-# 运行应用
-python app.py
+# 运行新版 Streamlit 前端（推荐）
+streamlit run streamlit_app.py --server.port 8001 --server.headless true
 ```
 
 #### 方法二：使用pip
@@ -68,8 +69,8 @@ python app.py
 # 安装依赖
 pip install -r requirements.txt
 
-# 运行应用
-python app.py
+# 运行新版 Streamlit 前端（推荐）
+streamlit run streamlit_app.py --server.port 8001 --server.headless true
 ```
 
 ### 配置新闻系统API（可选）
@@ -87,12 +88,11 @@ python app.py
 ### 启动应用
 
 ```bash
-python app.py
+streamlit run streamlit_app.py --server.port 8001 --server.headless true
 ```
 
-启动后将同时启动两个服务：
-- 玩家端 (Public): http://localhost:8001
-- 管理端 (Admin):  http://localhost:8002 (请保密)
+启动后通过浏览器访问 http://localhost:8001 ，玩家端与管理员端在同一页面的两个 Tab 内切换。
+如需使用旧版 Gradio 双端，可运行 `python app.py`（玩家端 8001，管理端 8002）。
 
 ## 游戏规则
 
@@ -153,11 +153,12 @@ python app.py
 
 ### 主要模块说明
 
-1. `app.py`: Gradio界面定义和事件绑定，包含玩家界面和管理员界面
-2. `backend.py`: 后端逻辑封装和数据接口，包括图表绘制功能
-3. `scripts/game_state.py`: 核心游戏逻辑和状态管理，包含玩家和游戏状态类
-4. `scripts/news_system.py`: 新闻生成和管理系统，支持AI生成新闻
-5. `scripts/player_manager.py`: 玩家数据结构定义
+1. `streamlit_app.py`: 默认 Streamlit 前端，包含玩家端和管理员端两个 Tab
+2. `app.py`: 旧版 Gradio 界面（保留便于回退）
+3. `backend.py`: 后端逻辑封装和数据接口，包括图表绘制功能
+4. `scripts/game_state.py`: 核心游戏逻辑和状态管理，包含玩家和游戏状态类
+5. `scripts/news_system.py`: 新闻生成和管理系统，支持AI生成新闻
+6. `scripts/player_manager.py`: 玩家数据结构定义
 
 ## 常见问题
 
